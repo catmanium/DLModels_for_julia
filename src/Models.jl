@@ -3,8 +3,9 @@ module Models
 include("Layers.jl")
 include("Optimizer.jl")
 include("DataSet.jl")
+include("Func.jl")
 
-export MLP,SimpleRNN,predict,learn,optimizer,dataset,model_f
+export MLP,SimpleRNN,ManyToOneRNN,predict,learn,optimizer,shaping_rnn
 
 using Random
 
@@ -53,6 +54,13 @@ mutable struct SimpleRNN_params <:Model_params
     rnn_layer
     optimizer
 end
+mutable struct ManyToOneRNN_params <: Model_params
+    params
+    grads
+    layers
+    optimizer
+    padding
+end
 
 #==========
 コンストラクタ
@@ -72,18 +80,9 @@ function MLP(;activation="Sigmoid",loss="Sigmoid_with_CrossEntropy",neuron,debug
     layers = []
     for i in 1:length(neuron)-1
         layers_tmp = []
-        params_tmp = []
-        grads_tmp = []
         #パラメータ生成
         W = randn(neuron[i],neuron[i+1])
-        b = randn(neuron[i+1])
-        dW = zeros(Float64,size(W))
-        db = zeros(Float64,size(b))
-        #各レイヤのparams,gradsをリストで管理
-        params_tmp = [W,b]
-        grads_tmp = [dW,db]
-        append!(params,params_tmp)
-        append!(grads,grads_tmp)
+        b = randn(neuron[i+1],1)
 
         if i == length(neuron)-1
             #活性化関数&損失関数レイヤ
@@ -96,9 +95,13 @@ function MLP(;activation="Sigmoid",loss="Sigmoid_with_CrossEntropy",neuron,debug
 
         #レイヤ生成
         layers_tmp = [
-            Layers.Affine(params_tmp,grads_tmp),
+            Layers.Affine(W,b),
             eval(activation_layer),
        ]
+
+       #params,gradsをリストへ
+       append!(params,layers_tmp[1].params) #Affineのparamsを取り出し
+       append!(grads,layers_tmp[1].grads) #Affineのgradsを取り出し
 
        append!(layers,layers_tmp)
     end
@@ -112,22 +115,68 @@ function SimpleRNN(;data_size,hidden_size,output_size)
     #重みの初期化
     rnn_Wx = randn(D,H)/sqrt(D)
     rnn_Wh = randn(H,H)/sqrt(H)
-    rnn_b = zeros(H)
+    rnn_b = zeros(1,H)
     affine_W = randn(H,O)/sqrt(H)
-    affine_b = zeros(O)
-    params = []
-    grads = []
+
+    #その他パラメータ
+    stateful = true
+    padding = nothing
+
+    affine_b = zeros(1,O)
+
+    #勾配の初期化は各レイヤで行う
 
     #レイヤの初期化
     layers = [
-        Layers.TimeRNN(rnn_Wx,rnn_Wh,rnn_b,true),
+        Layers.TimeRNN(rnn_Wx,rnn_Wh,rnn_b,stateful,padding),
         Layers.TimeAffine(affine_W,affine_b),
         Layers.TimeMse()
     ]
+
+    #params,gradsをリストへ
+    params = vcat(layers[1].params,layers[2].params)
+    grads = vcat(layers[1].grads,layers[2].grads)
     
     optimizer = []
 
     return SimpleRNN_params(params,grads,layers,layers[1],[])
+end
+function ManyToOneRNN(input_size,hidden_size,output_size)
+    #p : SimpleRNNとの差異
+
+    #hidden_size RNNレイヤの隠れ状態の次元数
+    D, H, O = input_size, hidden_size, output_size
+
+    #その他パラメータ
+    stateful = true
+    padding = nothing
+
+    #重みの初期化
+    # rnn_Wx = randn(D,H)/sqrt(D)
+    # rnn_Wh = randn(H,H)/sqrt(H)
+    # rnn_b = zeros(1,H)
+    rnn_Wx = randn(D,4*H)/sqrt(D)
+    rnn_Wh = randn(H,4*H)/sqrt(H)
+    rnn_b = zeros(1,4*H)
+
+    affine_W = randn(H,O)/sqrt(H)
+    affine_b = zeros(1,O)
+
+    #レイヤの初期化
+    layers = [
+        Layers.TimeLSTM(rnn_Wx,rnn_Wh,rnn_b,true,padding),
+        Layers.Affine(affine_W,affine_b), #p
+        Layers.Mean_Squared_Error() #p
+    ]    
+
+    #params,gradsをリストへ
+    params = vcat(layers[1].params,layers[2].params)
+    grads = vcat(layers[1].grads,layers[2].grads)
+
+    optimizer = []
+    padding = nothing
+
+    return ManyToOneRNN_params(params,grads,layers,optimizer,padding)
 end
 
 
@@ -148,7 +197,14 @@ function predict(params::SimpleRNN_params,data)
     ys = Layers.forward(params.layers[2],hs)
     return ys
 end
+function predict(this::ManyToOneRNN_params,data)
+    hs = Layers.forward(this.layers[1],data)
+    #使うのはTの出力のみ
+    h = hs[:,end,:]
+    y = Layers.forward(this.layers[2],h)
 
+    return y
+end
 
 #================
 学習
@@ -189,6 +245,7 @@ function learn(this::MLP_params;batch_size,max_epoch,data,t_data=[])
         #10回に一回出力する
         if i%(max_epoch/10) == 0
             println("ep.$i : Loss :　",epoch_avg_loss)
+            println("grads:",this.grads[1][1])
         end
 
         if i==1 || min_loss > epoch_avg_loss
@@ -207,7 +264,7 @@ function learn(this::MLP_params;batch_size,max_epoch,data,t_data=[])
 
     return loss_list
 end
-function learn(params::SimpleRNN_params;batch_size,max_epoch,window_size,data,t_data=[])
+function learn(this::SimpleRNN_params;batch_size,max_epoch,window_size,data,t_data=[])
     X = size(data,1) #総データ数
     D = size(data,2) #データ次元数
     T = window_size #RNNレイヤ数
@@ -230,25 +287,86 @@ function learn(params::SimpleRNN_params;batch_size,max_epoch,window_size,data,t_
                 ts[Int(n),:,:] = t_data[Int(st):Int(ed),:]
             end
             #順伝播
-            ys = predict(params,xs)
-            loss = Layers.forward(params.layers[end],ys,ts)
-            if epoch==1 && ite==1
-                println(size(loss))
-            end
+            ys = predict(this,xs)
+            loss = Layers.forward(this.layers[end],ys,ts)
             total_loss += sum(loss)
             #逆伝播
             dl = ones(Float64,size(loss))
-            dys = Layers.backward(params.layers[end],dl)
-            dhs = Layers.backward(params.layers[2],dys)
-            dxs = Layers.backward(params.layers[1],dhs)
+            dys = Layers.backward(this.layers[end],dl)
+            dhs = Layers.backward(this.layers[2],dys)
+            dxs = Layers.backward(this.layers[1],dhs)
             #更新
+            Optimizer.update(this.optimizer,this)
         end
+
         avg_loss = total_loss/(T*D*N)
         append!(loss_list,avg_loss)
+       
+        #10回に一回出力する
+        if epoch%(max_epoch/10) == 0
+            println("ep.$epoch : Loss :　",avg_loss)
+            println("grads:",this.grads[1][1])
+        end
     end
 
 
     return loss_list
+end
+function learn(this::ManyToOneRNN_params;max_epoch,window_size,data)
+    #先にshapingでデータ加工
+    #Tはsize(data,2)を割れる値にする
+
+    D = size(data,3) #データ次元数
+    T = window_size #RNNレイヤ数
+    N = size(data,1) #バッチ数
+
+    max_ite = size(data,2)/T #イテレーション数
+    loss_list = [] #avg_lossのリスト
+
+    grads_list = []
+
+    for epoch in 1:max_epoch
+        ite_total_loss = 0 #損失合計
+        avg_loss = 0 #1エポックの平均損失
+        st = 0 #data切り取り位置
+        ed = 0
+        for ite in 1:max_ite
+            #ミニバッチ作成
+            st = Int(1+(ite-1)*T)
+            ed = Int(T*ite)
+            xs = data[:,st:ed,:]
+            t = data[:,ed+1,:] #次のiteの先頭データ
+            #順伝播
+            y = predict(this,xs)
+            this.layers[end].t = t #教師データ挿入
+            loss = Layers.forward(this.layers[end],y)
+            #ite毎の平均損失を加算
+            ite_total_loss += sum(loss)/length(loss)
+            #逆伝播
+            dy = Layers.backward(this.layers[end],0)
+            dh = Layers.backward(this.layers[2],dy)
+            dxs = Layers.backward(this.layers[1],dh)
+            #勾配クリッピング
+            # append!(grads_list,this.grads[1][1])
+            #更新
+            Optimizer.update(this.optimizer,this)
+        end
+
+        avg_loss = ite_total_loss/max_ite
+        append!(loss_list,avg_loss)
+       
+        #10回に一回出力する
+        if epoch%(max_epoch/10) == 0 || epoch == 1
+            println("ep.$epoch : Loss :　",avg_loss)
+            # println("grads:",this.grads[1][1])
+            # println("grads_l:",this.layers[1].grads[2][1])
+        end
+    end
+
+    #学習の最後に隠れベクトルをリセット->predictする際，ミニバッチサイズが異なる為
+    Layers.reset_state(this.layers[1])
+
+    return loss_list, grads_list
 end
 
 #================
@@ -276,6 +394,44 @@ function optimizer(this::Model_params;name="Adam",learning_rate=0.001,p1=0.95,p2
     this.optimizer = eval(Meta.parse(optimizer_a))
 end
 
+
+#================
+データ整形
+=================#
+function shaping_rnn(model::ManyToOneRNN_params,data,N,padding)
+    model.padding = padding
+    #re_data (N, X/N, D)
+    #ite毎に切り出して使用する
+    #Tは2軸目のサイズに応じて後から決める
+
+    X,D = size(data)
+    re_data = []
+
+    #データの補充
+    if size(data,1)%N != 0
+        #(n,D)分，paddingで埋める
+        n = N - size(data,1)%N
+        padding_arr = fill(padding,n,D)
+        data = vcat(data,padding_arr) #補充
+        X,D = size(data)
+    end
+
+    re_data = reshape(data,Int(X/N),N,D)
+    re_data = permutedims(re_data,(2,1,3)) #軸の入れ替え
+
+    return re_data
+end
+function get_rate_of_change(array)
+    rate_arr = zeros(length(array)-1)
+    for i in 1:length(array)-1
+        rate = (array[i+1]-array[i])/array[i]
+        rate_arr[i] = rate
+    end
+    #行列化
+    rate_arr = reshape(rate_arr,(length(rate_arr),1))
+    return rate_arr
+end
+
 #================
 サンプルデータ
 =================#
@@ -286,33 +442,6 @@ function dataset(type::String,n::Int64)
 end
 
 
-#==============
-sample
-===============#
-mutable struct model_a
-    params
-    layers
-end
-
-function model_f()
-    params = []
-    layers = []
-    for i in 1:4
-        layers_tmp = []
-        params_tmp = []
-        W = randn(2,3)
-        b = randn(4)
-        #各レイヤのparams,gradsをリストで管理
-        params_tmp = [W,b]
-        append!(params,params_tmp)
-        layers_tmp = [
-            Layers.layer_f(params_tmp),
-        ]
-        append!(layers,layers_tmp)
-    end
-    
-    return model_a(params,layers)
-end
 
 
 end

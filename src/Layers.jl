@@ -19,6 +19,9 @@ module Layers
         ・s : スコア
     ・メソッド
         ・forward() : t=[]ならスコア，あるなら損失を返す
+
+その他
+・各レイヤの勾配はコンストラクタ内で生成 -> Model,Timeレイヤと非共有にするため
 ==================#
 
 #params
@@ -56,33 +59,43 @@ mutable struct mse_params <: Params
     t::Array
 end
 mutable struct RNN_params <: Params
-    Wx::Array{Float64,2}
-    Wh::Array{Float64,2}
-    b::Array{Float64,1}
-    dWx::Array{Float64,2}
-    dWh::Array{Float64,2}
-    cache
+    params #Wx,Wh,b
+    grads #dWx,dWh,db
+    cache #x, h_prev, h_next
+    padding #空白データ，TimeRnn，Modelとメモリ共有
 end
 mutable struct TimeRNN_params <: Params
-    Wx::Array{Float64,2}
-    Wh::Array{Float64,2}
-    b::Array{Float64,1}
-    dWx::Array{Float64,2}
-    dWh::Array{Float64,2}
-    #複数のRNNレイヤを管理
-    layers
-    h
+    params #Wx,Wh,b
+    grads #dWx,dWh,db
+    layers #複数のRNNレイヤを管理
+    h #次のエポックに引き継ぐ
     dh
     stateful
+    padding #空白データ，Rnn，Modelとメモリ共有
 end
 mutable struct TimeAffine_params <: Params
-    W::Array{Float64,2}
-    b::Array{Float64,1}
-    dW::Array{Float64,2}
-    layers
+    params #W,b
+    grads #dW
+    layers #複数のAffineレイヤを管理
 end
 mutable struct TimeMse_params <: Params
     layers
+end
+mutable struct LSTM_params <: Params
+    params #Wx,Wh,b
+    grads #dWx,dWh,db
+    cache #x, h_prev, h_next,i,f,g,o,c_next
+    padding #空白データ，TimeRnn，Modelとメモリ共有
+end
+mutable struct TimeLSTM_params <: Params
+    params #Wx,Wh,b
+    grads #dWx,dWh,db
+    layers #複数のRNNレイヤを管理
+    h #次のエポックに引き継ぐ
+    c
+    dh
+    stateful
+    padding #空白データ，Rnn，Modelとメモリ共有
 end
 
 
@@ -93,7 +106,11 @@ function Sigmoid()
     grads = []
     return Sigmoid_params(params,grads,out)
 end
-function Affine(params,grads)
+function Affine(W::Array{Float64,2},b::Array{Float64,2})
+    params = [W,b]
+    dW = zeros(Float64,size(W))
+    db = zeros(Float64,size(b))
+    grads = [dW,db]
     in=[] 
     return Affine_params(params,grads,in)            
 end
@@ -123,27 +140,67 @@ function Mean_Squared_Error()
     t = []
     return mse_params(params,grads,s,t)
 end
-function RNN(Wx::Array{Float64,2},Wh::Array{Float64,2},b::Array{Float64,1})
+function RNN(Wx::Array{Float64,2},Wh::Array{Float64,2},b::Array{Float64,2},padding)
+    #勾配の初期化
     dWx = zeros(size(Wx))
     dWh = zeros(size(Wh))
+    db = zeros(size(b))
+    #パラメータ，勾配のリスト化
+    params = [Wx,Wh,b]
+    grads = [dWx,dWh,db]
     cache = []
-    return RNN_params(Wx,Wh,b,dWx,dWh,cache)
+    return RNN_params(params,grads,cache,padding)
 end
-function TimeRNN(Wx::Array{Float64,2},Wh::Array{Float64,2},b::Array{Float64,1},stateful::Bool)
+function TimeRNN(Wx::Array{Float64,2},Wh::Array{Float64,2},b::Array{Float64,2},stateful::Bool,padding)
+    #勾配初期化
     dWx = zeros(size(Wx))
     dWh = zeros(size(Wh))
+    db = zeros(size(b))
+    #重み，バイアス，勾配をリスト化
+    params = [Wx,Wh,b]
+    grads = [dWx,dWh,db]
+    #その他
     layers = nothing
     dh = nothing
     h = nothing
-    return TimeRNN_params(Wx,Wh,b,dWx,dWh,layers,dh,h,stateful)
+    return TimeRNN_params(params,grads,layers,h,dh,stateful,padding)
 end
-function TimeAffine(W::Array{Float64,2},b::Array{Float64,1})
+function TimeAffine(W::Array{Float64,2},b::Array{Float64,2})
     dW = zeros(size(W))
+    db = zeros(size(b))
+    params = [W,b]
+    grads = [dW,db]
     layers = []
-    return TimeAffine_params(W,b,dW,layers)
+    return TimeAffine_params(params,grads,layers)
 end
 function TimeMse()
     return TimeMse_params([])
+end
+function LSTM(Wx::Array{Float64,2},Wh::Array{Float64,2},b::Array{Float64,2},padding)
+    #勾配の初期化
+    dWx = zeros(size(Wx))
+    dWh = zeros(size(Wh))
+    db = zeros(size(b))
+    #パラメータ，勾配のリスト化
+    params = [Wx,Wh,b]
+    grads = [dWx,dWh,db]
+    cache = []
+    return LSTM_params(params,grads,cache,padding)
+end
+function TimeLSTM(Wx::Array{Float64,2},Wh::Array{Float64,2},b::Array{Float64,2},stateful::Bool,padding)
+    #勾配初期化
+    dWx = zeros(size(Wx))
+    dWh = zeros(size(Wh))
+    db = zeros(size(b))
+    #重み，バイアス，勾配をリスト化
+    params = [Wx,Wh,b]
+    grads = [dWx,dWh,db]
+    #その他
+    layers = nothing
+    dh = nothing
+    h = nothing
+    c = nothing
+    return TimeLSTM_params(params,grads,layers,h,c,dh,stateful,padding)
 end
 
 
@@ -192,17 +249,29 @@ function forward(layer::mse_params,in)
     return l
 end
 function forward(layer::RNN_params,x,h_prev)
-    t = h_prev*layer.Wh + x*layer.Wx .+ layer.b'
+    Wx,Wh,b = layer.params
+    padding = layer.padding
+
+    t = h_prev*Wh + x*Wx .+ b
     h_next = tanh.(t)
+
+    #x に padding が指定してある場合，h_prevの値をそのまま伝播
+    if padding !== nothing
+        #インデックス取得
+        ids = Tuple.(findall(x->x==padding,x))
+        #行番号を取得
+        id_cs = first.(ids)
+        max,min = extrema(id_cs)
+        #h_next に h_prevを代入
+        h_next[max:min,:] .= h_prev[max:min,:]
+    end
 
     layer.cache = [x,h_prev,h_next]
 
     return h_next
 end
 function forward(layer::TimeRNN_params,xs)
-    Wx = layer.Wx
-    Wh = layer.Wh
-    b = layer.b
+    Wx,Wh,b = layer.params
     #バッチサイズ，ブロック数，入力データ数
     N, T, D = size(xs)
     D, H = size(Wx)
@@ -215,7 +284,7 @@ function forward(layer::TimeRNN_params,xs)
     end
 
     for t in 1:T
-        rnn_layer = RNN(layer.Wx,layer.Wh,layer.b)
+        rnn_layer = RNN(Wx,Wh,b,layer.padding)
         layer.h = forward(rnn_layer,xs[:,t,:],layer.h)
         hs[:,t,:] = layer.h
         push!(layer.layers,rnn_layer)
@@ -224,13 +293,15 @@ function forward(layer::TimeRNN_params,xs)
     return hs
 end
 function forward(layer::TimeAffine_params,hs)
+    W,b = layer.params
+    dW = layer.grads
     N,T,H = size(hs)
-    H,O = size(layer.W)
+    H,O = size(W)
     ys = zeros(Float64,(N,T,O))
 
     for t in 1:T
         h = hs[:,t,:]
-        affine_layer = Affine(layer.W,layer.b)
+        affine_layer = Affine(W,b)
         y = forward(affine_layer,h)
         ys[:,t,:] = y
         push!(layer.layers,affine_layer)
@@ -252,10 +323,61 @@ function forward(layer::TimeMse_params,ys,t_data)
 
     return loss
 end
+function forward(layer::LSTM_params,x,h_prev,c_prev)
+    Wx, Wh, b = layer.params
+    N, H = size(h_prev)
+
+    A = x * Wx + h_prev * Wh .+ b
+
+    #slice
+    f = A[:, begin:H]
+    g = A[:, H+1:2*H]
+    i = A[:, 2*H+1:3*H]
+    o = A[:, 3*H+1:end]
+
+    f = 1.0 ./ (1.0 .+ exp.(-f)) #Sigmoid
+    g = tanh.(g)
+    i = 1.0 ./ (1.0 .+ exp.(-i))
+    o = 1.0 ./ (1.0 .+ exp.(-o))
+
+    c_next = f .* c_prev + g .* i
+    h_next = o .* tanh.(c_next)
+
+    layer.cache = [x, h_prev, c_prev, i, f, g, o, c_next]
+
+    return h_next, c_next
+
+end
+function forward(layer::TimeLSTM_params,xs)
+    Wx,Wh,b = layer.params
+    #バッチサイズ，ブロック数，入力データ数
+    N, T, D = size(xs)
+    H = size(Wh,1)
+
+    layer.layers = []
+    hs = zeros(Float64,(N,T,H))
+
+    if !layer.stateful || layer.h === nothing
+        layer.h = zeros(Float64,(N,H))
+    end
+
+    if !layer.stateful || layer.c === nothing
+        layer.c = zeros(Float64,(N,H))
+    end
+
+    for t in 1:T
+        rnn_layer = LSTM(Wx,Wh,b,layer.padding)
+        layer.h, layer.c = forward(rnn_layer,xs[:,t,:],layer.h,layer.c)
+        hs[:,t,:] = layer.h
+        push!(layer.layers,rnn_layer)
+    end
+
+    return hs
+end
 
 #backward
 function backward(layer::Affine_params,din)
-    layer.grads[1] .= (layer.in)' * din
+    layer.grads[1] .= (layer.in)' * din #dW
     return din * (layer.params[1])'
 end
 function backward(layer::ReLU_params,din)
@@ -276,52 +398,86 @@ function backward(layer::mse_params,din)
     return (layer.s - layer.t)
 end
 function backward(layer::RNN_params,dh_next)
-    Wx, Wh, b = layer.Wx, layer.Wh, layer.b
+    Wx, Wh, b = layer.params
     x, h_prev, h_next = layer.cache
 
     dt = dh_next .* (1 .- h_next .^2)
+    db = sum(dt,dims=1)
     dWh = h_prev' * dt
     dh_prev = dt * Wh'
     dWx = x' * dt
     dx = dt * Wx'
 
-    layer.dWx = dWx
-    layer.dWh = dWh
+    layer.grads .= [dWx,dWh,db]
 
     return dx,dh_prev
 end
 function backward(layer::TimeRNN_params,dhs)
-    Wx = layer.Wx
-    Wh = layer.Wh
-    b = layer.b
-    N, T, H = size(dhs)
+    Wx, Wh, b = layer.params
     D, H = size(Wx)
+    
+    #dhsの次元数から処理を分岐
+    if ndims(dhs) == 2
+        #many to one (dhs が (N,H))
+        N, H = size(dhs)
+        T = length(layer.layers)
+        dxs = zeros(Float64,(N,T,D))
+        #代入する勾配
+        grads = copy(layer.grads)
+        grads -= grads #全て0に
+        
+        dh = copy(dhs)
+        for t in T:-1:1
+            rnn_layer = layer.layers[t]
+            dx, dh = backward(rnn_layer,dh)
+            dxs[:,t,:] = dx
 
-    dxs = zeros(Float64,(N,T,D))
-    dh = zeros(Float64,size(dhs[:,1,:]))
+            #各レイヤの勾配合算 
+            grads += rnn_layer.grads
+        end
 
-    for t in T:-1:1
-        rnn_layer = layer.layers[t]
-        dx, dh = backward(rnn_layer,dhs[:,t,:]+dh)
-        dxs[:,t,:] = dx
+        #TimeRNN,Modelsの勾配更新-> Model.gradsとメモリ共有しているため同時に更新される
+        layer.grads[1][:] = grads[1][:]
+        layer.grads[2][:] = grads[2][:]
+        layer.grads[3][:] = grads[3][:]
 
-        #勾配合算
-        layer.dWx .+= rnn_layer.dWx
-        layer.dWh .+= rnn_layer.dWh
+    elseif ndims(dhs) == 3
+        #many to many (dhs が (N,T,H))
+        N, T, H = size(dhs)
+        dxs = zeros(Float64,(N,T,D))
+
+        dh = zeros(Float64,size(dhs[:,1,:]))
+        for t in T:-1:1
+            rnn_layer = layer.layers[t]
+            dx, dh = backward(rnn_layer,dhs[:,t,:]+dh)
+            dxs[:,t,:] = dx
+
+            #勾配合算 -> Model.gradsとメモリ共有しているため同時に更新される
+            for i in 1:3
+                layer.grads[i] .+= rnn_layer.grads[i]
+            end
+        end
     end
+
+    layer.dh = dh
 
     return dxs
     
 end
 function backward(layer::TimeAffine_params,dys)
     N, T, O = size(dys)
-    H, O = size(layer.layers[1].W)
+    H, O = size(layer.layers[1].params[1]) #W
     dhs = zeros(Float64,(N,T,H))
 
     for t in 1:T
         dh = zeros(Float64,(N,H))
-        dh = backward(layer.layers[t],dys[:,t,:])
+        affine_layer = layer.layers[t]
+        dh = backward(affine_layer,dys[:,t,:])
         dhs[:,t,:] = dh
+        #勾配合算 -> Model.gradsとメモリ共有しているため同時に更新される
+        for i in 1:2
+            layer.grads[i] .+= affine_layer.grads[i]
+        end
     end
 
     return dhs
@@ -338,6 +494,96 @@ function backward(layer::TimeMse_params,dloss)
 
     return dys
 end
+function backward(layer::LSTM_params,dh_next,dc_next)
+    Wx, Wh, b = layer.params
+    x, h_prev, c_prev, i, f, g, o, c_next = layer.cache
+
+    tanh_c_next = tanh.(c_next)
+
+    ds = dc_next + (dh_next .* o) .* (1 .- tanh_c_next.^2)
+
+    dc_prev = ds .* f
+
+    di = ds .* g
+    df = ds .* c_prev
+    d_o = dh_next .* tanh_c_next
+    dg = ds .* i
+
+    di .*= i .* (1 .- i)
+    df .*= f .* (1 .- f)
+    d_o .*= o .* (1 .- o)
+    dg .*= (1 .- g.^2)
+
+    dA = hcat(df,dg,di,d_o)
+
+    dWh = h_prev' * dA
+    dWx = x' * dA
+    db = sum(dA,dims=1)
+
+    layer.grads[1][:] = dWx
+    layer.grads[2][:] = dWh
+    layer.grads[3][:] = db
+
+    dx = dA * Wx'
+    dh_prev = dA * Wh'
+
+    return dx, dh_prev, dc_prev
+end
+function backward(layer::TimeLSTM_params,dhs)
+    Wx, Wh, b = layer.params
+    D, H = size(Wx)
+    
+    #dhsの次元数から処理を分岐
+    if ndims(dhs) == 2
+        #many to one (dhs が (N,H))
+        N, H = size(dhs)
+        T = length(layer.layers)
+        dxs = zeros(Float64,(N,T,D))
+        #代入する勾配
+        grads = copy(layer.grads)
+        grads -= grads #全て0に
+        
+        dh = copy(dhs)
+        dc = zeros(Float64,size(dh))
+        
+        for t in T:-1:1
+            rnn_layer = layer.layers[t]
+            dx, dh, dc = backward(rnn_layer,dh,dc)
+            dxs[:,t,:] = dx
+
+            #各レイヤの勾配合算 
+            grads += rnn_layer.grads
+        end
+
+        #TimeRNN,Modelsの勾配更新-> Model.gradsとメモリ共有しているため同時に更新される
+        layer.grads[1][:] = grads[1][:]
+        layer.grads[2][:] = grads[2][:]
+        layer.grads[3][:] = grads[3][:]
+
+    elseif ndims(dhs) == 3
+        #many to many (dhs が (N,T,H))
+        N, T, H = size(dhs)
+        dxs = zeros(Float64,(N,T,D))
+
+        dh = zeros(Float64,size(dhs[:,1,:]))
+        dc = zeros(Float64,size(dhs[:,1,:]))
+        for t in T:-1:1
+            rnn_layer = layer.layers[t]
+            dx, dh, dc = backward(rnn_layer,dhs[:,t,:]+dh, dc)
+            dxs[:,t,:] = dx
+
+            #勾配合算 -> Model.gradsとメモリ共有しているため同時に更新される
+            for i in 1:3
+                layer.grads[i] .+= rnn_layer.grads[i]
+            end
+        end
+    end
+
+    layer.dh = dh
+
+    return dxs
+    
+end
 
 
 #TimeRNN functions
@@ -347,17 +593,10 @@ end
 function reset_state(layer::TimeRNN_params)
     layer.h = nothing
 end
-    
-#==============
-sample
-===============#
-mutable struct layer_a
-    params
-end
 
-function layer_f(params)
-    return layer_a(params)
+function reset_state(layer::TimeLSTM_params)
+    layer.h = nothing
+    layer.c = nothing
 end
-
 
 end
