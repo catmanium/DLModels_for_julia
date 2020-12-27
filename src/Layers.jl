@@ -244,7 +244,7 @@ function forward(layer::mse_params,in)
         #ただの推論
         return layer.s
     end
-    l = ((layer.t-in).^2)/2
+    l = sum.(((layer.t-in).^2))/length(layer.t)
 
     return l
 end
@@ -395,7 +395,7 @@ function backward(layer::Sig_and_loss_params,din)
     return layer.s - layer.t
 end
 function backward(layer::mse_params,din)
-    return (layer.s - layer.t)
+    return (layer.s - layer.t).*(2/length(layer.t))
 end
 function backward(layer::RNN_params,dh_next)
     Wx, Wh, b = layer.params

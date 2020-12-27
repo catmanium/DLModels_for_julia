@@ -5,9 +5,9 @@ include("Optimizer.jl")
 include("DataSet.jl")
 include("Func.jl")
 
-export MLP,SimpleRNN,ManyToOneRNN,predict,learn,optimizer,shaping_rnn
+export MLP,SimpleRNN,ManyToOneRNN,predict,learn,optimizer,shaping_rnn,save
 
-using Random
+using Random,JSON
 
 #==============================
 共通メンバ変数
@@ -34,7 +34,6 @@ using Random
 
 
 ===============================#
-
 
 #========
 Model_params
@@ -179,6 +178,9 @@ function ManyToOneRNN(input_size,hidden_size,output_size)
     return ManyToOneRNN_params(params,grads,layers,optimizer,padding)
 end
 
+function hoge()
+    return 0
+end
 
 #================
 推論
@@ -404,7 +406,7 @@ function shaping_rnn(model::ManyToOneRNN_params,data,N,padding)
     #ite毎に切り出して使用する
     #Tは2軸目のサイズに応じて後から決める
 
-    X,D = size(data)
+    X,D = size(data,1),size(data,2)
     re_data = []
 
     #データの補充
@@ -441,6 +443,15 @@ function dataset(type::String,n::Int64)
     return eval(type_function)
 end
 
+#=================
+その他
+==================#
+function save(model::Model_params,path) 
+    JSON.json(model)
+    f = open("$path","w") #ファイル生成
+    JSON.print(f, model)
+    close(f)
+end
 
 
 
