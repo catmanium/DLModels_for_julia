@@ -207,6 +207,9 @@ end
 #forward
 function forward(layer::Affine_params,in)
     layer.in = in #逆伝播に使う
+    # println(size(in))
+    # println(size(layer.params[1]))
+    # println(size(layer.params[2]'))
     return in * layer.params[1] .+ layer.params[2]'
 end
 function forward(layer::Sigmoid_params,in)

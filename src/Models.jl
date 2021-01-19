@@ -159,12 +159,13 @@ function ManyToOneRNN(input_size,hidden_size,output_size)
     rnn_b = zeros(1,4*H)
 
     affine_W = randn(H,O)/sqrt(H)
-    affine_b = zeros(1,O)
+    affine_b = zeros(O,1)
 
     #レイヤの初期化
     layers = [
         Layers.TimeLSTM(rnn_Wx,rnn_Wh,rnn_b,true,padding),
         Layers.Affine(affine_W,affine_b), #p
+
         Layers.Mean_Squared_Error() #p
     ]    
 
@@ -314,7 +315,7 @@ function learn(this::SimpleRNN_params;batch_size,max_epoch,window_size,data,t_da
 
     return loss_list
 end
-function learn(this::ManyToOneRNN_params;max_epoch,window_size,data)
+function learn(this::ManyToOneRNN_params;max_epoch,window_size,data,t_data)
     #先にshapingでデータ加工
     #Tはsize(data,2)を割れる値にする
 
@@ -322,7 +323,7 @@ function learn(this::ManyToOneRNN_params;max_epoch,window_size,data)
     T = window_size #RNNレイヤ数
     N = size(data,1) #バッチ数
 
-    max_ite = size(data,2)/T #イテレーション数
+    max_ite = size(data,2)÷T #イテレーション数
     loss_list = [] #avg_lossのリスト
 
     grads_list = []
@@ -337,7 +338,7 @@ function learn(this::ManyToOneRNN_params;max_epoch,window_size,data)
             st = Int(1+(ite-1)*T)
             ed = Int(T*ite)
             xs = data[:,st:ed,:]
-            t = data[:,ed+1,:] #次のiteの先頭データ
+            t = t_data[:,ite,:]
             #順伝播
             y = predict(this,xs)
             this.layers[end].t = t #教師データ挿入
@@ -357,8 +358,7 @@ function learn(this::ManyToOneRNN_params;max_epoch,window_size,data)
         avg_loss = ite_total_loss/max_ite
         append!(loss_list,avg_loss)
        
-        #10回に一回出力する
-        if epoch%(max_epoch/10) == 0 || epoch == 1
+        if epoch == 1 || epoch%(max_epoch÷10) == 0
             println("ep.$epoch : Loss :　",avg_loss)
             # println("grads:",this.grads[1][1])
             # println("grads_l:",this.layers[1].grads[2][1])
@@ -367,6 +367,7 @@ function learn(this::ManyToOneRNN_params;max_epoch,window_size,data)
 
     #学習の最後に隠れベクトルをリセット->predictする際，ミニバッチサイズが異なる為
     Layers.reset_state(this.layers[1])
+    this.layers[end].t = [] #正解データリセット
 
     return loss_list, grads_list
 end
@@ -446,13 +447,25 @@ end
 #=================
 その他
 ==================#
-function save(model::Model_params,path) 
+function save(model::Model_params,file) 
     JSON.json(model)
-    f = open("$path","w") #ファイル生成
+    f = open("$file","w") #ファイル生成
     JSON.print(f, model)
     close(f)
 end
 
+function load(model::Model_params,file)
+    if !isfile(file)
+        println("no file.")
+        return nothing
+    end
+
+    f = open("$file","r")
+    model_a = JSON.parse(f)
+
+    model.params = model_a["params"]
+    model.grads = model_a["grads"]
+end
 
 
 end
